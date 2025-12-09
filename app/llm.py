@@ -64,6 +64,7 @@ class LlmClient:
         return prompt
 
     async def draft_response(self, request: ResponseRequiredRequest):
+        print(f"[DEBUG] OpenRouter API Key Length: {len(os.environ.get('OPENROUTER_API_KEY', ''))}")
         prompt = self.prepare_prompt(request)
         stream = await self.client.chat.completions.create(
             model="moonshotai/kimi-k2-0905",
