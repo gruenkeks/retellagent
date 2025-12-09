@@ -77,6 +77,12 @@ class LlmClient:
             model="moonshotai/kimi-k2-0905",
             messages=prompt,
             stream=True,
+            extra_body={
+                "provider": {
+                    "order": ["groq"],
+                    "allow_fallbacks": True
+                }
+            }
         )
         async for chunk in stream:
             if chunk.choices[0].delta.content is not None:
