@@ -71,12 +71,29 @@ class LlmClient:
         print(f"[DEBUG] Contains whitespace: {any(c.isspace() for c in api_key)}")
         has_quotes = '"' in api_key or "'" in api_key
         print(f"[DEBUG] Contains quotes: {has_quotes}")
-        
+
         prompt = self.prepare_prompt(request)
+
+        # Prefer Groq first (fast) and allow other providers to fall back.
+        provider = {
+            "order": ["groq"],
+            "allow_fallbacks": True,
+        }
+
+        # If a GROQ_API_KEY is provided (BYOK), pass it through to OpenRouter
+        # so Groq can authenticate the request and avoid "User not found".
+        groq_api_key = os.environ.get("GROQ_API_KEY")
+        if groq_api_key:
+            provider["credentials"] = {"groq": groq_api_key}
+            print("[DEBUG] Using GROQ_API_KEY for provider credentials")
+        else:
+            print("[DEBUG] GROQ_API_KEY not set; relying on OpenRouter-managed access")
+
         stream = await self.client.chat.completions.create(
             model="@preset/kimik2groqpreset",
             messages=prompt,
             stream=True,
+            extra_body={"provider": provider},
         )
         async for chunk in stream:
             if chunk.choices[0].delta.content is not None:
