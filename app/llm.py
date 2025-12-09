@@ -64,7 +64,13 @@ class LlmClient:
         return prompt
 
     async def draft_response(self, request: ResponseRequiredRequest):
-        print(f"[DEBUG] OpenRouter API Key Length: {len(os.environ.get('OPENROUTER_API_KEY', ''))}")
+        api_key = os.environ.get('OPENROUTER_API_KEY', '')
+        print(f"[DEBUG] OpenRouter API Key Length: {len(api_key)}")
+        print(f"[DEBUG] Key starts with: {api_key[:10]}...")
+        print(f"[DEBUG] Key ends with: ...{api_key[-5:]}")
+        print(f"[DEBUG] Contains whitespace: {any(c.isspace() for c in api_key)}")
+        print(f"[DEBUG] Contains quotes: {'\"' in api_key or '\'' in api_key}")
+        
         prompt = self.prepare_prompt(request)
         stream = await self.client.chat.completions.create(
             model="moonshotai/kimi-k2-0905",

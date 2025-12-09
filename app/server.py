@@ -12,7 +12,7 @@ from .custom_types import (
 )
 from .llm import LlmClient  # or use .llm_with_func_calling
 
-load_dotenv(override=True)
+load_dotenv()
 app = FastAPI()
 retell = Retell(api_key=os.environ["RETELL_API_KEY"])
 
