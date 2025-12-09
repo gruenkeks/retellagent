@@ -69,7 +69,8 @@ class LlmClient:
         print(f"[DEBUG] Key starts with: {api_key[:10]}...")
         print(f"[DEBUG] Key ends with: ...{api_key[-5:]}")
         print(f"[DEBUG] Contains whitespace: {any(c.isspace() for c in api_key)}")
-        print(f"[DEBUG] Contains quotes: {'\"' in api_key or '\'' in api_key}")
+        has_quotes = '"' in api_key or "'" in api_key
+        print(f"[DEBUG] Contains quotes: {has_quotes}")
         
         prompt = self.prepare_prompt(request)
         stream = await self.client.chat.completions.create(
