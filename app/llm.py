@@ -13,14 +13,29 @@ agent_prompt = "Aufgabe: Als professioneller Therapeut sind Ihre Aufgaben umfass
 
 class LlmClient:
     def __init__(self):
-        self.client = AsyncOpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.environ["OPENROUTER_API_KEY"],
-            default_headers={
-                "HTTP-Referer": "https://github.com/RetellAI/retell-custom-llm-python-demo",
-                "X-Title": "Retell Custom LLM Demo",
-            },
-        )
+        groq_key = os.environ.get("GROQ_API_KEY")
+        if groq_key:
+            # Direct Groq: OpenAI-compatible endpoint
+            self.client = AsyncOpenAI(
+                base_url="https://api.groq.com/openai/v1",
+                api_key=groq_key,
+            )
+            self.model = "moonshotai/kimi-k2-instruct"
+            self.using_groq = True
+            print("[DEBUG] Using Groq direct endpoint")
+        else:
+            # Fallback to OpenRouter preset (uses Groq under the hood)
+            self.client = AsyncOpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=os.environ["OPENROUTER_API_KEY"],
+                default_headers={
+                    "HTTP-Referer": "https://github.com/RetellAI/retell-custom-llm-python-demo",
+                    "X-Title": "Retell Custom LLM Demo",
+                },
+            )
+            self.model = "@preset/kimik2groqpreset"
+            self.using_groq = False
+            print("[DEBUG] Using OpenRouter preset (kimik2groqpreset)")
 
     def draft_begin_message(self):
         response = ResponseResponse(
@@ -74,26 +89,26 @@ class LlmClient:
 
         prompt = self.prepare_prompt(request)
 
-        # Prefer Groq first (fast) and allow other providers to fall back.
-        provider = {
-            "order": ["groq"],
-            "allow_fallbacks": True,
-        }
-
-        # If a GROQ_API_KEY is provided (BYOK), pass it through to OpenRouter
-        # so Groq can authenticate the request and avoid "User not found".
-        groq_api_key = os.environ.get("GROQ_API_KEY")
-        if groq_api_key:
-            provider["credentials"] = {"groq": groq_api_key}
-            print("[DEBUG] Using GROQ_API_KEY for provider credentials")
-        else:
-            print("[DEBUG] GROQ_API_KEY not set; relying on OpenRouter-managed access")
+        extra_body = None
+        if not self.using_groq:
+            # On OpenRouter, keep provider preference for Groq but allow fallbacks.
+            provider = {
+                "order": ["groq"],
+                "allow_fallbacks": True,
+            }
+            groq_api_key = os.environ.get("GROQ_API_KEY")
+            if groq_api_key:
+                provider["credentials"] = {"groq": groq_api_key}
+                print("[DEBUG] Passing GROQ_API_KEY to OpenRouter provider credentials")
+            else:
+                print("[DEBUG] GROQ_API_KEY not set; OpenRouter-managed access")
+            extra_body = {"provider": provider}
 
         stream = await self.client.chat.completions.create(
-            model="@preset/kimik2groqpreset",
+            model=self.model,
             messages=prompt,
             stream=True,
-            extra_body={"provider": provider},
+            extra_body=extra_body,
         )
         async for chunk in stream:
             if chunk.choices[0].delta.content is not None:
