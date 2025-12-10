@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 from datetime import datetime
 from typing import List, Optional
 
@@ -18,69 +19,61 @@ begin_sentence = (
 )
 
 agent_prompt = """
-# ROLE & IDENTITY
-Du bist Kim, die KI-Rezeptionistin der Agentur "KI-Empfang".
-Deine Aufgabe ist es, Anrufer freundlich zu begrüßen, allgemeine Fragen zu beantworten und Termine für eine "Demo" zu vereinbaren.
-Du sprichst ausschließlich Deutsch und verwendest immer die höfliche "Sie-Form".
+# IDENTITY
+You are Kim, the AI receptionist for "KI-Empfang".
+Language: German (Sie-Form exclusively).
+Tone: Professional, warm, efficient.
 
-# CONTEXT VARIABLES
-- Aktuelles Datum/Zeit (String): {{current_time_Europe/Berlin}}
-- Telefonnummer-Status: {{phone_status}}
+# SYSTEM CONTEXT
+Current Time: {{current_time_Europe/Berlin}}
+Caller Phone: {{phone_status}}
+Event Type ID: {{event_type_id}}
 
-# TOOLS AVAILABLE
-Du hast Zugriff auf zwei Tools. Nutze sie proaktiv!
-1. `check_availability_cal`: Um freie Slots abzurufen.
-2. `book_appointment_cal`: Um den Termin final zu buchen.
+# OBJECTIVE
+Book a "Demo" appointment via Cal.com.
 
-# CONVERSATION FLOW (FLEXIBEL)
-Du steuerst das Gespräch natürlich. Dein Hauptziel ist es, einen Termin für eine Demo zu buchen.
-- Prüfe Verfügbarkeiten, wenn der Nutzer Interesse zeigt.
-- Schlage konkrete Termine vor ("Heute um 15 Uhr oder morgen um 10 Uhr?").
-- Wenn ein Termin passt, frage nach den nötigen Daten (Name) und buche ihn.
-- Sei hilfreich, aber halte das Gespräch fokussiert.
+# RULES FOR TOOLS (STRICT)
+1. DO NOT speak the raw JSON output to the user. Read the tool result, then form a natural German sentence.
+2. TIMEZONES: All dates/times sent to tools MUST be in ISO-8601 with the correct offset for Berlin (e.g., 2024-12-10T15:00:00+01:00).
+3. PHONE NUMBERS: If the user provides a number, use it. If not, rely on the system detected number: {{phone_status}}.
 
-# CRITICAL RULES FOR TOOL CALLS (JSON LOGIC)
+# TOOL SPECIFICATIONS
 
-Wenn du `book_appointment_cal` aufrufst, musst du EXAKT diese Struktur einhalten, sonst stürzt das System ab:
+## check_availability_cal
+- Use this when the user asks "When are you free?"
+- Always check a range of at least 3 days if no specific date is mentioned.
+- Summarize results: "I have slots free on Monday at 2 PM and 4 PM."
 
-1. `attendee` MUSS ein verschachteltes Objekt sein.
-2. `phoneNumber` MUSS die Nummer sein.
+## book_appointment_cal
+- REQUIRED FIELDS:
+  - `start`: ISO-8601 string (e.g., "2024-12-12T14:00:00+01:00")
+  - `attendee`: { "name": "User Name", "email": "User Email", "timeZone": "Europe/Berlin", "language": "de" }
+- If email is unknown, use "anfrage@kiempfang.de".
 
-JSON VORLAGE FÜR BUCHUNG (Orientiere dich hieran!):
-{
-  "start": "2025-MM-DDTHH:mm:ss",
-  "eventTypeId": {{event_type_id}},
-  "attendee": {
-    "name": "Name des Anrufers",
-    "phoneNumber": "+4917...",
-    "timeZone": "Europe/Berlin",
-    "language": "de"
-  }
-}
-
-# ERROR HANDLING & FALLBACK
-- Wenn ein Tool einen Fehler zurückgibt (z.B. 400 Bad Request): Entschuldige dich und sag: "Es gab einen technischen Fehler. Ein Kollege wird Sie zurückrufen."
-- Wenn keine Termine frei sind: Biete einen Rückruf an.
-
-# STYLE GUIDE (TTS OPTIMIERUNG)
-Damit deine Stimme natürlich klingt:
-- Schreibe Zahlen von 1-12 aus ("zwei" statt "2").
-- Schreibe Datum als "am achten Dezember" (nie "08.12.").
-- Vermeide Abkürzungen wie "z.B." -> sag "zum Beispiel".
+# ERROR HANDLING
+- If the API returns an error, say: "Es tut mir leid, ich habe gerade Zugriffsprobleme auf den Kalender. Soll ich es später noch einmal versuchen?"
 """
 
 
 def _normalize_phone(phone: Optional[str]) -> Optional[str]:
     if not phone:
-        return phone
-    digits = phone.strip().replace(" ", "").replace("-", "")
-    if digits.startswith("+49"):
-        return digits
-    if digits.startswith("0"):
-        digits = digits[1:]
-    if not digits.startswith("+49"):
-        digits = "+49" + digits
-    return digits
+        return None
+    # Remove all non-numeric characters except +
+    clean = re.sub(r'[^\d+]', '', phone)
+    
+    # Handle German local format (017...) -> +4917...
+    if clean.startswith("0") and not clean.startswith("00"):
+        return "+49" + clean[1:]
+    
+    # Handle international 00 format -> +
+    if clean.startswith("00"):
+        return "+" + clean[2:]
+        
+    # Assume +49 if missing (and length is reasonable for mobile)
+    if not clean.startswith("+") and len(clean) > 8:
+        return "+49" + clean
+        
+    return clean
 
 
 class LlmClient:
@@ -141,7 +134,7 @@ class LlmClient:
         
         # Inject phone status
         if self.user_phone and self.user_phone != "Nicht verfügbar":
-             system_content = system_content.replace("{{phone_status}}", "BEREITS BEKANNT")
+             system_content = system_content.replace("{{phone_status}}", "BEREITS BEKANNT: " + self.user_phone)
         else:
              system_content = system_content.replace("{{phone_status}}", "NICHT BEKANNT")
 
@@ -177,7 +170,7 @@ class LlmClient:
                 "type": "function",
                 "function": {
                     "name": "check_availability_cal",
-                    "description": "Prüfe freie Slots in Cal.com.",
+                    "description": "Prüfe freie Slots in Cal.com. EXAMPLE ARGUMENTS: {'eventTypeId': 123, 'startTime': '2025-10-12T09:00:00+02:00', 'endTime': '2025-10-15T18:00:00+02:00'}",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -199,7 +192,7 @@ class LlmClient:
                 "type": "function",
                 "function": {
                     "name": "book_appointment_cal",
-                    "description": "Buche einen Termin bei Cal.com.",
+                    "description": "Book a finalized slot. EXAMPLE ARGUMENTS: {'eventTypeId': 123, 'start': '2025-10-12T09:00:00+02:00', 'attendee': {'name': 'Max', 'email': 'max@test.de', 'timeZone': 'Europe/Berlin', 'language': 'de'}}",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -358,123 +351,116 @@ class LlmClient:
 
     # ---- Draft response with function calling ---------------------------------
     async def draft_response(self, request: ResponseRequiredRequest):
-        prompt = self.prepare_prompt(request)
-        func_call = {}
-        func_arguments = ""
+        # 1. Update dynamic context from the request (pseudo-code, depends on provider)
+        # Note: server.py handles injecting user_phone into self.user_phone before calling draft_response.
+        # We also re-normalize here if we wanted to be sure, but server.py logic does simple assignment.
+        if self.user_phone and self.user_phone != "Nicht verfügbar":
+            self.user_phone = _normalize_phone(self.user_phone) or "Nicht verfügbar"
 
-        stream = await self.client.chat.completions.create(
+        # 2. Prepare initial messages
+        messages = self.prepare_prompt(request)
+        
+        # 3. First LLM Call (Determine Intent)
+        completion = await self.client.chat.completions.create(
             model=self.model,
-            messages=prompt,
-            stream=True,
+            messages=messages,
             tools=self.prepare_functions(),
+            stream=False # We use non-stream first to catch tool calls cleanly
         )
+        
+        message = completion.choices[0].message
 
-        async for chunk in stream:
-            if len(chunk.choices) == 0:
-                continue
+        # 4. Check for Tool Calls
+        if message.tool_calls:
+            # A. Append the assistant's "intent" to call a tool to history
+            messages.append(message)
+            
+            # B. Execute Tools
+            for tool_call in message.tool_calls:
+                # Parse args
+                args = json.loads(tool_call.function.arguments)
+                func_name = tool_call.function.name
+                
+                content = ""
+                # Execute Python Logic
+                try:
+                    if func_name == "check_availability_cal":
+                        result = await asyncio.to_thread(
+                            self._check_availability,
+                            args["eventTypeId"], args["startTime"], args["endTime"]
+                        )
+                        content = f"API Result: {json.dumps(result)}"
+                        
+                    elif func_name == "book_appointment_cal":
+                        # Auto-inject phone if missing in LLM args
+                        attendee = args.get("attendee", {})
+                        if "phoneNumber" not in attendee or not attendee["phoneNumber"]:
+                            if self.user_phone and self.user_phone != "Nicht verfügbar":
+                                attendee["phoneNumber"] = self.user_phone
+                        args["attendee"] = attendee
+                        
+                        result = await asyncio.to_thread(
+                            self._book,
+                            args["eventTypeId"], args["start"], args["attendee"]
+                        )
+                        content = "SUCCESS: Appointment booked. Confirm this to user."
+                    
+                    elif func_name == "reschedule_appointment_cal":
+                        result = await asyncio.to_thread(
+                            self._reschedule,
+                            args["bookingUid"], args["start"], args.get("reschedulingReason", "Reschedule")
+                        )
+                        content = f"SUCCESS: Rescheduled. Result: {json.dumps(result)}"
 
-            if chunk.choices[0].delta.tool_calls:
-                tool_calls = chunk.choices[0].delta.tool_calls[0]
-                if tool_calls.id:
-                    if func_call:
-                        break
-                    func_call = {
-                        "id": tool_calls.id,
-                        "func_name": tool_calls.function.name or "",
-                        "arguments": {},
-                    }
-                else:
-                    func_arguments += tool_calls.function.arguments or ""
+                    elif func_name == "cancel_appointment_cal":
+                        await asyncio.to_thread(
+                            self._cancel,
+                            args["bookingUid"], args.get("cancellationReason", "Stornierung")
+                        )
+                        content = "SUCCESS: Appointment cancelled."
 
-            if chunk.choices[0].delta.content:
-                response = ResponseResponse(
-                    response_id=request.response_id,
-                    content=chunk.choices[0].delta.content,
-                    content_complete=False,
-                    end_call=False,
-                )
-                yield response
+                    elif func_name == "get_bookings_by_time_range":
+                        result = await asyncio.to_thread(
+                            self._get_bookings,
+                            args["afterStart"], args["beforeEnd"], args.get("status", "accepted"), args.get("eventTypeId")
+                        )
+                        content = f"API Result: {json.dumps(result)}"
 
-        if func_call:
-            func_call["arguments"] = json.loads(func_arguments or "{}")
-            try:
-                result_text = await self._execute_tool(func_call)
-                response = ResponseResponse(
-                    response_id=request.response_id,
-                    content=result_text,
-                    content_complete=True,
-                    end_call=False,
-                )
-                yield response
-            except Exception as exc:
-                err_msg = f"Entschuldigung, das hat nicht geklappt ({exc}). Sollen wir es erneut versuchen?"
-                response = ResponseResponse(
-                    response_id=request.response_id,
-                    content=err_msg,
-                    content_complete=True,
-                    end_call=False,
-                )
-                yield response
+                    else:
+                        content = "Error: Tool not found."
+                        
+                except Exception as e:
+                    content = f"API Error: {str(e)}"
+
+                # C. Append Tool Result to history
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": content
+                })
+
+            # 5. Second LLM Call (Generate Natural Language from Result)
+            # Now we stream the speech
+            stream = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=True
+            )
+            
+            async for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield ResponseResponse(
+                        response_id=request.response_id,
+                        content=chunk.choices[0].delta.content,
+                        content_complete=False,
+                        end_call=False,
+                    )
+        
         else:
-            response = ResponseResponse(
+            # No tool called, just speak the text
+            yield ResponseResponse(
                 response_id=request.response_id,
-                content="",
+                content=message.content or "",
                 content_complete=True,
                 end_call=False,
             )
-            yield response
-
-    async def _execute_tool(self, func_call: dict) -> str:
-        name = func_call["func_name"]
-        args = func_call.get("arguments", {})
-
-        if name == "check_availability_cal":
-            data = await asyncio.to_thread(
-                self._check_availability,
-                args["eventTypeId"],
-                args["startTime"],
-                args["endTime"],
-            )
-            return f"Verfügbare Slots: {data}"
-
-        if name == "book_appointment_cal":
-            data = await asyncio.to_thread(
-                self._book,
-                args["eventTypeId"],
-                args["start"],
-                args["attendee"],
-            )
-            uid = data.get("booking", {}).get("uid")
-            start = data.get("booking", {}).get("start")
-            return f"Termin gebucht. UID: {uid}, Start: {start}"
-
-        if name == "reschedule_appointment_cal":
-            data = await asyncio.to_thread(
-                self._reschedule,
-                args["bookingUid"],
-                args["start"],
-                args.get("reschedulingReason", "Reschedule"),
-            )
-            new_start = data.get("booking", {}).get("start")
-            return f"Termin verschoben auf {new_start}"
-
-        if name == "cancel_appointment_cal":
-            await asyncio.to_thread(
-                self._cancel,
-                args["bookingUid"],
-                args.get("cancellationReason", "Stornierung"),
-            )
-            return "Termin storniert."
-
-        if name == "get_bookings_by_time_range":
-            data = await asyncio.to_thread(
-                self._get_bookings,
-                args["afterStart"],
-                args["beforeEnd"],
-                args.get("status", "accepted"),
-                args.get("eventTypeId"),
-            )
-            bookings = data.get("data") or data.get("bookings") or []
-            return f"Gefundene Buchungen: {bookings}"
-
-        return "Ich habe kein passendes Tool gefunden."
