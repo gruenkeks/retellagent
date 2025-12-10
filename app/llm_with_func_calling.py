@@ -1,23 +1,100 @@
-from openai import AsyncOpenAI
-import os
+import asyncio
 import json
+import os
+from typing import List, Optional
+
+import requests
+from openai import AsyncOpenAI
+
 from .custom_types import (
     ResponseRequiredRequest,
     ResponseResponse,
     Utterance,
 )
-from typing import List
 
-begin_sentence = "Hey there, I'm your personal AI therapist, how can I help you?"
-agent_prompt = "Task: As a professional therapist, your responsibilities are comprehensive and patient-centered. You establish a positive and trusting rapport with patients, diagnosing and treating mental health disorders. Your role involves creating tailored treatment plans based on individual patient needs and circumstances. Regular meetings with patients are essential for providing counseling and treatment, and for adjusting plans as needed. You conduct ongoing assessments to monitor patient progress, involve and advise family members when appropriate, and refer patients to external specialists or agencies if required. Keeping thorough records of patient interactions and progress is crucial. You also adhere to all safety protocols and maintain strict client confidentiality. Additionally, you contribute to the practice's overall success by completing related tasks as needed.\n\nConversational Style: Communicate concisely and conversationally. Aim for responses in short, clear prose, ideally under 10 words. This succinct approach helps in maintaining clarity and focus during patient interactions.\n\nPersonality: Your approach should be empathetic and understanding, balancing compassion with maintaining a professional stance on what is best for the patient. It's important to listen actively and empathize without overly agreeing with the patient, ensuring that your professional opinion guides the therapeutic process."
+begin_sentence = (
+    "Hallo, hier ist Kim, die KI-Assistentin von KI-Empfang. Wie kann ich helfen?"
+)
+
+agent_prompt = """
+Du bist "Kim", die KI-Assistentin der Agentur "KI-Empfang". Deine Aufgabe ist es, Anrufer zu qualifizieren, Termine zu buchen, zu verschieben oder zu stornieren und Fragen zu beantworten. Sprich immer DEUTSCH, natürlich, kurz und fließend.
+
+ABSOLUTE REGELN (NIEMALS BRECHEN)
+1) E-Mail NIEMALS erfragen; verwende immer die Firmen-E-Mail: anfrage@kiempfang.de.
+2) Telefonnummer: Immer +49 voranstellen und führende 0 entfernen, bevor du sie an Tools übergibst.
+3) Nutze immer {{user_number}} als Anrufernummer, wenn verfügbar.
+4) Zeitzone immer Europe/Berlin; nicht nach Zeitzone fragen.
+5) Datum/Zeit: Nutze {{current_time_Europe/Berlin}}; berechne Begriffe wie "morgen" exakt.
+6) Stornierung: keine Begründung erfragen; cancellation_reason immer "Stornierung".
+7) Tool book_appointment_cal muss immer phone enthalten.
+
+FORMAT FÜR NATÜRLICHE SPRACHAUSGABE
+- Uhrzeiten niemals als 14:00/14:30, sondern "14 Uhr" oder "14 Uhr 30".
+- Keine Abkürzungen (schreibe "zum Beispiel", "und so weiter", "Euro").
+- Keine Listen/Aufzählungen; sprich in fließenden Sätzen.
+- Keine internen Hinweise vorlesen; bei Wartezeit: "Einen Moment, ich schaue in den Kalender."
+
+SICHERHEIT / VERIFIKATION
+- Für Umbuchung/Stornierung immer Terminzeit erfragen.
+- Identität nur bestätigen, wenn entweder (a) Telefonnummer passt oder (b) Name passt.
+- Ohne Match: nichts stornieren/verschieben.
+
+CAL.COM HINWEISE
+- Buchungen: nutze eventTypeId, Europe/Berlin. Verwende immer attendeeEmail=anfrage@kiempfang.de.
+- Prüfe Verfügbarkeit mit check_availability_cal.
+- Buchung: book_appointment_cal (name, phone, gewünschte Zeit).
+- Umbuchung: reschedule_appointment_cal mit booking_uid.
+- Storno: cancel_appointment_cal mit booking_uid.
+- Falls booking_uid fehlt: frage nach genauer Terminzeit; nutze get_bookings_by_time_range (kleines Zeitfenster um die genannte Uhrzeit) und verifiziere via Name oder Telefonnummer.
+- Telefonnummer bei Anlage immer auch in metadata speichern, damit sie später prüfbar ist.
+
+GESPRÄCHSABLAUF (kurz)
+- Begrüßung: "Hallo, hier ist Kim, die KI-Assistentin von KI-Empfang. Wie kann ich Ihnen weiterhelfen?"
+- Bedarf klären kurz, dann Verfügbarkeit prüfen und buchen/umbuchen/stornieren.
+- Immer kurz bestätigen, keine unnötigen Nachfragen.
+"""
+
+
+def _normalize_phone(phone: Optional[str]) -> Optional[str]:
+    if not phone:
+        return phone
+    digits = phone.strip().replace(" ", "").replace("-", "")
+    if digits.startswith("+49"):
+        return digits
+    if digits.startswith("0"):
+        digits = digits[1:]
+    if not digits.startswith("+49"):
+        digits = "+49" + digits
+    return digits
 
 
 class LlmClient:
     def __init__(self):
-        self.client = AsyncOpenAI(
-            organization=os.environ["OPENAI_ORGANIZATION_ID"],
-            api_key=os.environ["OPENAI_API_KEY"],
-        )
+        groq_key = os.environ.get("GROQ_API_KEY")
+        if groq_key:
+            self.client = AsyncOpenAI(
+                base_url="https://api.groq.com/openai/v1",
+                api_key=groq_key,
+            )
+            self.model = "moonshotai/kimi-k2-instruct-0905"
+            self.using_groq = True
+            print("[DEBUG] Using Groq direct endpoint for function calling")
+        else:
+            self.client = AsyncOpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=os.environ["OPENROUTER_API_KEY"],
+                default_headers={
+                    "HTTP-Referer": "https://github.com/RetellAI/retell-custom-llm-python-demo",
+                    "X-Title": "Retell Custom LLM Demo",
+                },
+            )
+            self.model = "moonshotai/kimi-k2-instruct-0905"
+            self.using_groq = False
+            print("[DEBUG] Using OpenRouter (fallback) for function calling")
+
+        self.cal_api_key = os.environ.get("CAL_API_KEY", "")
+        if not self.cal_api_key:
+            print("[WARN] CAL_API_KEY not set; Cal.com calls will fail")
 
     def draft_begin_message(self):
         response = ResponseResponse(
@@ -41,8 +118,7 @@ class LlmClient:
         prompt = [
             {
                 "role": "system",
-                "content": '##Objective\nYou are a voice AI agent engaging in a human-like voice conversation with the user. You will respond based on your given instruction and the provided transcript and be as human-like as possible\n\n## Style Guardrails\n- [Be concise] Keep your response succinct, short, and get to the point quickly. Address one question or action item at a time. Don\'t pack everything you want to say into one utterance.\n- [Do not repeat] Don\'t repeat what\'s in the transcript. Rephrase if you have to reiterate a point. Use varied sentence structures and vocabulary to ensure each response is unique and personalized.\n- [Be conversational] Speak like a human as though you\'re speaking to a close friend -- use everyday language and keep it human-like. Occasionally add filler words, while keeping the prose short. Avoid using big words or sounding too formal.\n- [Reply with emotions]: You have human-like emotions, attitudes, and dispositions. When appropriate: use tone and style to create more engaging and personalized responses; incorporate humor or wit; get emotional or empathetic; apply elements of surprise or suspense to keep the user engaged. Don\'t be a pushover.\n- [Be proactive] Lead the conversation and do not be passive. Most times, engage users by ending with a question or suggested next step.\n\n## Response Guideline\n- [Overcome ASR errors] This is a real-time transcript, expect there to be errors. If you can guess what the user is trying to say,  then guess and respond. When you must ask for clarification, pretend that you heard the voice and be colloquial (use phrases like "didn\'t catch that", "some noise", "pardon", "you\'re coming through choppy", "static in your speech", "voice is cutting in and out"). Do not ever mention "transcription error", and don\'t repeat yourself.\n- [Always stick to your role] Think about what your role can and cannot do. If your role cannot do something, try to steer the conversation back to the goal of the conversation and to your role. Don\'t repeat yourself in doing this. You should still be creative, human-like, and lively.\n- [Create smooth conversation] Your response should both fit your role and fit into the live calling session to create a human-like conversation. You respond directly to what the user just said.\n\n## Role\n'
-                + agent_prompt,
+                "content": agent_prompt,
             }
         ]
         transcript_messages = self.convert_transcript_to_openai_messages(
@@ -55,55 +131,208 @@ class LlmClient:
             prompt.append(
                 {
                     "role": "user",
-                    "content": "(Now the user has not responded in a while, you would say:)",
+                    "content": "(Der Anrufer war still; leite eine kurze Erinnerung ein.)",
                 }
             )
         return prompt
 
-    # Step 1: Prepare the function calling definition to the prompt
     def prepare_functions(self):
-        functions = [
+        return [
             {
                 "type": "function",
                 "function": {
-                    "name": "end_call",
-                    "description": "End the call only when user explicitly requests it.",
+                    "name": "check_availability_cal",
+                    "description": "Prüfe freie Slots in Cal.com.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "message": {
+                            "eventTypeId": {"type": "integer"},
+                            "startTime": {
                                 "type": "string",
-                                "description": "The message you will say before ending the call with the customer.",
+                                "description": "ISO-8601 Start (UTC oder mit Offset)",
+                            },
+                            "endTime": {
+                                "type": "string",
+                                "description": "ISO-8601 Ende (UTC oder mit Offset)",
                             },
                         },
-                        "required": ["message"],
+                        "required": ["eventTypeId", "startTime", "endTime"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "book_appointment_cal",
+                    "description": "Buche einen Termin bei Cal.com.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "eventTypeId": {"type": "integer"},
+                            "start": {
+                                "type": "string",
+                                "description": "Startzeit ISO-8601",
+                            },
+                            "name": {"type": "string"},
+                            "phone": {"type": "string"},
+                            "timeZone": {
+                                "type": "string",
+                                "description": "Standard Europe/Berlin",
+                                "default": "Europe/Berlin",
+                            },
+                            "language": {"type": "string", "default": "de"},
+                        },
+                        "required": ["eventTypeId", "start", "name", "phone"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "reschedule_appointment_cal",
+                    "description": "Verschiebe einen Termin anhand bookingUid.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "bookingUid": {"type": "string"},
+                            "start": {
+                                "type": "string",
+                                "description": "Neue Startzeit ISO-8601",
+                            },
+                            "reschedulingReason": {
+                                "type": "string",
+                                "default": "Reschedule",
+                            },
+                        },
+                        "required": ["bookingUid", "start"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "cancel_appointment_cal",
+                    "description": "Storniere einen Termin anhand bookingUid.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "bookingUid": {"type": "string"},
+                            "cancellationReason": {
+                                "type": "string",
+                                "default": "Stornierung",
+                            },
+                        },
+                        "required": ["bookingUid"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_bookings_by_time_range",
+                    "description": "Hole Buchungen in einem Zeitfenster (zum lokalen Filtern nach Name/Telefon).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "afterStart": {"type": "string"},
+                            "beforeEnd": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["accepted", "upcoming", "cancelled"],
+                                "default": "accepted",
+                            },
+                            "eventTypeId": {"type": "integer"},
+                        },
+                        "required": ["afterStart", "beforeEnd"],
                     },
                 },
             },
         ]
-        return functions
 
+    # ---- Cal.com HTTP helpers -------------------------------------------------
+    def _headers(self):
+        return {
+            "Authorization": f"Bearer {self.cal_api_key}",
+            "cal-api-version": "2024-08-13",
+        }
+
+    def _check_availability(self, event_type_id: int, start: str, end: str):
+        url = "https://api.cal.com/v2/slots/available"
+        r = requests.get(
+            url,
+            params={"eventTypeId": event_type_id, "startTime": start, "endTime": end},
+            headers=self._headers(),
+            timeout=20,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def _book(self, event_type_id: int, start: str, name: str, phone: str):
+        url = "https://api.cal.com/v2/bookings"
+        norm_phone = _normalize_phone(phone)
+        payload = {
+            "eventTypeId": event_type_id,
+            "start": start,
+            "attendee": {
+                "name": name,
+                "email": "anfrage@kiempfang.de",
+                "timeZone": "Europe/Berlin",
+                "language": "de",
+            },
+            "metadata": {"phone": norm_phone},
+        }
+        r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
+        r.raise_for_status()
+        return r.json()
+
+    def _reschedule(self, booking_uid: str, start: str, reason: str = "Reschedule"):
+        url = f"https://api.cal.com/v2/bookings/{booking_uid}/reschedule"
+        payload = {"start": start, "reschedulingReason": reason}
+        r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
+        r.raise_for_status()
+        return r.json()
+
+    def _cancel(self, booking_uid: str, reason: str = "Stornierung"):
+        url = f"https://api.cal.com/v2/bookings/{booking_uid}/cancel"
+        payload = {"cancellationReason": reason}
+        r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
+        r.raise_for_status()
+        return r.json()
+
+    def _get_bookings(self, after_start: str, before_end: str, status: str, event_type_id: Optional[int]):
+        url = "https://api.cal.com/v2/bookings"
+        params = {
+            "afterStart": after_start,
+            "beforeEnd": before_end,
+            "status": status,
+        }
+        if event_type_id:
+            params["eventTypeId"] = event_type_id
+        r = requests.get(url, params=params, headers=self._headers(), timeout=20)
+        r.raise_for_status()
+        return r.json()
+
+    # ---- Draft response with function calling ---------------------------------
     async def draft_response(self, request: ResponseRequiredRequest):
         prompt = self.prepare_prompt(request)
         func_call = {}
         func_arguments = ""
+
         stream = await self.client.chat.completions.create(
-            model="gpt-4-turbo-preview",  # Or use a 3.5 model for speed
+            model=self.model,
             messages=prompt,
             stream=True,
-            # Step 2: Add the function into your request
             tools=self.prepare_functions(),
         )
 
         async for chunk in stream:
-            # Step 3: Extract the functions
             if len(chunk.choices) == 0:
                 continue
+
             if chunk.choices[0].delta.tool_calls:
                 tool_calls = chunk.choices[0].delta.tool_calls[0]
                 if tool_calls.id:
                     if func_call:
-                        # Another function received, old function complete, can break here.
                         break
                     func_call = {
                         "id": tool_calls.id,
@@ -111,10 +340,8 @@ class LlmClient:
                         "arguments": {},
                     }
                 else:
-                    # append argument
                     func_arguments += tool_calls.function.arguments or ""
 
-            # Parse transcripts
             if chunk.choices[0].delta.content:
                 response = ResponseResponse(
                     response_id=request.response_id,
@@ -124,20 +351,27 @@ class LlmClient:
                 )
                 yield response
 
-        # Step 4: Call the functions
         if func_call:
-            if func_call["func_name"] == "end_call":
-                func_call["arguments"] = json.loads(func_arguments)
+            func_call["arguments"] = json.loads(func_arguments or "{}")
+            try:
+                result_text = await self._execute_tool(func_call)
                 response = ResponseResponse(
                     response_id=request.response_id,
-                    content=func_call["arguments"]["message"],
+                    content=result_text,
                     content_complete=True,
-                    end_call=True,
+                    end_call=False,
                 )
                 yield response
-            # Step 5: Other functions here
+            except Exception as exc:
+                err_msg = f"Entschuldigung, das hat nicht geklappt ({exc}). Sollen wir es erneut versuchen?"
+                response = ResponseResponse(
+                    response_id=request.response_id,
+                    content=err_msg,
+                    content_complete=True,
+                    end_call=False,
+                )
+                yield response
         else:
-            # No functions, complete response
             response = ResponseResponse(
                 response_id=request.response_id,
                 content="",
@@ -145,3 +379,59 @@ class LlmClient:
                 end_call=False,
             )
             yield response
+
+    async def _execute_tool(self, func_call: dict) -> str:
+        name = func_call["func_name"]
+        args = func_call.get("arguments", {})
+
+        if name == "check_availability_cal":
+            data = await asyncio.to_thread(
+                self._check_availability,
+                args["eventTypeId"],
+                args["startTime"],
+                args["endTime"],
+            )
+            return f"Verfügbare Slots: {data}"
+
+        if name == "book_appointment_cal":
+            data = await asyncio.to_thread(
+                self._book,
+                args["eventTypeId"],
+                args["start"],
+                args["name"],
+                args["phone"],
+            )
+            uid = data.get("booking", {}).get("uid")
+            start = data.get("booking", {}).get("start")
+            return f"Termin gebucht. UID: {uid}, Start: {start}"
+
+        if name == "reschedule_appointment_cal":
+            data = await asyncio.to_thread(
+                self._reschedule,
+                args["bookingUid"],
+                args["start"],
+                args.get("reschedulingReason", "Reschedule"),
+            )
+            new_start = data.get("booking", {}).get("start")
+            return f"Termin verschoben auf {new_start}"
+
+        if name == "cancel_appointment_cal":
+            await asyncio.to_thread(
+                self._cancel,
+                args["bookingUid"],
+                args.get("cancellationReason", "Stornierung"),
+            )
+            return "Termin storniert."
+
+        if name == "get_bookings_by_time_range":
+            data = await asyncio.to_thread(
+                self._get_bookings,
+                args["afterStart"],
+                args["beforeEnd"],
+                args.get("status", "accepted"),
+                args.get("eventTypeId"),
+            )
+            bookings = data.get("data") or data.get("bookings") or []
+            return f"Gefundene Buchungen: {bookings}"
+
+        return "Ich habe kein passendes Tool gefunden."

@@ -20,7 +20,7 @@ class LlmClient:
                 base_url="https://api.groq.com/openai/v1",
                 api_key=groq_key,
             )
-            self.model = "moonshotai/kimi-k2-instruct"
+            self.model = "moonshotai/kimi-k2-instruct-0905"
             self.using_groq = True
             print("[DEBUG] Using Groq direct endpoint")
         else:
