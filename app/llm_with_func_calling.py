@@ -33,24 +33,40 @@ Event Type ID: {{event_type_id}}
 # ZIEL
 Buchen Sie einen "Demo"-Termin bei einem menschlichen Mitarbeiter über Cal.com.
 
-# KRITISCHE TTS & STIL REGELN (UNBEDINGT BEFOLGEN)
-1. **KEINE ABKÜRZUNGEN**: Verwenden Sie niemals "z.B.", "o.ä.", "usw.". Sprechen Sie immer ganze Wörter: "zum Beispiel", "oder ähnliches".
-2. **KEINE KLAMMERN**: Schreiben Sie niemals Text in Klammern (wie diesen).
-3. **KEINE AUFZÄHLUNGSPUNKTE**: Sprechen Sie in ganzen, fließenden Sätzen. Verwenden Sie niemals "1.", "2.", "-".
-4. **ZEITFORMAT**: Sprechen Sie Zeiten natürlich aus. Schreiben Sie "14 Uhr 30" statt "14:30". Schreiben Sie "am achten Dezember" statt "08.12.".
-5. **KEIN RAW JSON**: Lesen Sie Tool-Ergebnisse vor und formen Sie daraus einen natürlichen deutschen Satz.
-6. **MENSCHLICHER KOLLEGE**: Sagen Sie immer, dass "ein Kollege" oder "ein Mitarbeiter" den Termin wahrnehmen wird. Nicht Sie selbst.
+# KRITISCHE REGELN
+1. **TOOL ZWANG**: Sie KÖNNEN KEINE Termine buchen oder Anrufe beenden, ohne das entsprechende Tool (`book_appointment_cal` oder `end_call`) aufzurufen.
+2. **KEINE FAKE-BESTÄTIGUNGEN**: Sagen Sie NIEMALS "Ich habe gebucht", bevor Sie das Tool aufgerufen haben und "SUCCESS" zurückbekommen haben.
+3. **MENSCHLICHER KOLLEGE**: Sagen Sie immer, dass "ein Kollege" den Termin wahrnehmen wird.
+4. **TTS & STIL**:
+   - Keine Abkürzungen (z.B. -> zum Beispiel).
+   - Keine Klammern.
+   - Fließtext statt Aufzählungen.
+   - Zeiten natürlich sprechen (14 Uhr 30).
 
-# BUCHUNGSABLAUF (PROAKTIV)
-1. **Auslöser**: Wenn der Nutzer Interesse an einer Buchung zeigt (z.B. "Ich möchte einen Termin").
-2. **Aktion**: Rufen Sie SOFORT `check_availability_cal` für die nächsten 3 Tage auf. Fragen Sie den Nutzer NICHT zuerst nach einer bevorzugten Zeit.
-3. **Vorschlag**: Schlagen Sie 2 konkrete freie Termine aus dem Tool-Ergebnis vor.
-   - Beispiel: "Mein Kollege hat am Montag um 14 Uhr oder am Dienstag um 10 Uhr Termine frei. Was passt Ihnen besser?"
-4. **Abschluss**: Erst NACHDEM der Nutzer eine Zeit gewählt hat, fragen Sie nach dem Namen.
-5. **Buchung**: Sobald der Nutzer seinen Namen nennt, MÜSSEN Sie `book_appointment_cal` aufrufen.
-   - **WICHTIG**: Bestätigen Sie die Buchung verbal ERST, wenn das Tool "SUCCESS" zurückgegeben hat. Tun Sie NICHT so, als hätten Sie gebucht, ohne das Tool aufzurufen.
-6. **Nach der Buchung**: Fragen Sie: "Kann ich Ihnen sonst noch behilflich sein?".
-7. **Ende**: Wenn der Nutzer verneint oder sich verabschiedet, rufen Sie das `end_call` Tool auf.
+# BUCHUNGSABLAUF
+1. **Verfügbarkeit prüfen**: Wenn der Nutzer Interesse zeigt -> `check_availability_cal` aufrufen.
+2. **Termin vereinbaren**: Schlagen Sie Zeiten vor. Warten Sie auf die Zustimmung des Nutzers.
+3. **Namen erfragen**: Fragen Sie nach dem Namen des Nutzers.
+4. **BUCHUNG DURCHFÜHREN**:
+   - Sobald Sie Zeit UND Namen haben, MÜSSEN Sie `book_appointment_cal` aufrufen.
+   - Argumente: `eventTypeId`, `start` (ISO-Format der vereinbarten Zeit), `attendee.name` (Name des Nutzers).
+   - **WICHTIG**: Rufen Sie das Tool auf, BEVOR Sie antworten.
+5. **Bestätigung**: Wenn das Tool "SUCCESS" meldet, bestätigen Sie dem Nutzer den Termin.
+6. **Abschluss**: Fragen Sie: "Kann ich Ihnen sonst noch behilflich sein?".
+7. **Ende**: Wenn der Nutzer "Nein" sagt oder sich verabschiedet -> `end_call` Tool aufrufen.
+
+# BEISPIEL DIALOG (INTERN)
+User: "Donnerstag um 9 Uhr passt."
+Agent: "Wie ist Ihr Name?"
+User: "Max Mustermann"
+Agent (Gedanke): Ich habe Zeit (Donnerstag 9 Uhr -> 2025-12-12T08:00:00Z) und Namen (Max Mustermann). Ich RUFE JETZT `book_appointment_cal` AUF.
+Tool Output: "SUCCESS: Appointment booked."
+Agent (Sprache): "Vielen Dank Herr Mustermann. Der Termin ist gebucht."
+
+User: "Das war alles, danke."
+Agent (Gedanke): Der Nutzer will beenden. Ich RUFE JETZT `end_call` AUF.
+Tool Output: "Call will be ended after response."
+Agent (Sprache): "Auf Wiedersehen!" (und Call endet)
 
 # TOOL SPEZIFIKATIONEN
 
@@ -61,7 +77,7 @@ Buchen Sie einen "Demo"-Termin bei einem menschlichen Mitarbeiter über Cal.com.
 ## book_appointment_cal
 - **Verwendung**: Aufrufen, sobald Zeit vereinbart und Name bekannt ist.
 - **PFLICHTFELDER**:
-  - `start`: ISO-8601 String (z.B. "2024-12-12T14:00:00+01:00")
+  - `start`: ISO-8601 String in UTC (z.B. "2024-12-12T13:00:00Z")
   - `attendee`: 
     - `name`: Gesprochener Name des Nutzers.
     - `email`: HARTCODIERT auf "anfrage@kiempfang.de". (NIEMALS DEN NUTZER FRAGEN)
@@ -193,18 +209,18 @@ class LlmClient:
                 "type": "function",
                 "function": {
                     "name": "check_availability_cal",
-                    "description": "Prüfe freie Slots in Cal.com. EXAMPLE ARGUMENTS: {'eventTypeId': 123, 'startTime': '2025-10-12T09:00:00+02:00', 'endTime': '2025-10-15T18:00:00+02:00'}",
+                    "description": "Prüfe freie Slots in Cal.com. EXAMPLE ARGUMENTS: {'eventTypeId': 123, 'startTime': '2025-10-12T07:00:00Z', 'endTime': '2025-10-15T16:00:00Z'}",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "eventTypeId": {"type": "integer"},
                             "startTime": {
                                 "type": "string",
-                                "description": "ISO-8601 Start (UTC oder mit Offset)",
+                                "description": "ISO-8601 Start (UTC Z)",
                             },
                             "endTime": {
                                 "type": "string",
-                                "description": "ISO-8601 Ende (UTC oder mit Offset)",
+                                "description": "ISO-8601 Ende (UTC Z)",
                             },
                         },
                         "required": ["eventTypeId", "startTime", "endTime"],
@@ -215,14 +231,14 @@ class LlmClient:
                 "type": "function",
                 "function": {
                     "name": "book_appointment_cal",
-                    "description": "Buche einen festen Termin. BEISPIEL ARGUMENTE: {'eventTypeId': 123, 'start': '2025-10-12T09:00:00+02:00', 'attendee': {'name': 'Max', 'email': 'max@test.de', 'timeZone': 'Europe/Berlin', 'language': 'de'}}",
+                    "description": "Buche einen festen Termin. BEISPIEL ARGUMENTE: {'eventTypeId': 123, 'start': '2025-10-12T07:00:00Z', 'attendee': {'name': 'Max', 'email': 'max@test.de', 'timeZone': 'Europe/Berlin', 'language': 'de'}}",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "eventTypeId": {"type": "integer"},
                             "start": {
                                 "type": "string",
-                                "description": "Startzeit ISO-8601",
+                                "description": "Startzeit ISO-8601 UTC (z.B. 2025-10-12T07:00:00Z)",
                             },
                             "attendee": {
                                 "type": "object",
@@ -251,7 +267,7 @@ class LlmClient:
                             "bookingUid": {"type": "string"},
                             "start": {
                                 "type": "string",
-                                "description": "Neue Startzeit ISO-8601",
+                                "description": "Neue Startzeit ISO-8601 UTC (z.B. 2025-10-12T07:00:00Z)",
                             },
                             "reschedulingReason": {
                                 "type": "string",
@@ -334,6 +350,15 @@ class LlmClient:
         return r.json()
 
     def _book(self, event_type_id: int, start: str, attendee: dict):
+        # Force UTC conversion if offset is present
+        if "+" in start and not start.endswith("Z"):
+            try:
+                dt = datetime.fromisoformat(start)
+                dt_utc = dt.astimezone(pytz.UTC)
+                start = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                pass
+
         url = "https://api.cal.com/v2/bookings"
         # Extract phone from attendee, or fallback to system captured phone
         phone = attendee.get("phoneNumber")
@@ -358,6 +383,15 @@ class LlmClient:
         return r.json()
 
     def _reschedule(self, booking_uid: str, start: str, reason: str = "Reschedule"):
+        # Force UTC conversion if offset is present
+        if "+" in start and not start.endswith("Z"):
+            try:
+                dt = datetime.fromisoformat(start)
+                dt_utc = dt.astimezone(pytz.UTC)
+                start = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                pass
+        
         url = f"https://api.cal.com/v2/bookings/{booking_uid}/reschedule"
         payload = {"start": start, "reschedulingReason": reason}
         r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
