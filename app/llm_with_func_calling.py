@@ -13,7 +13,7 @@ from .custom_types import (
 )
 
 begin_sentence = (
-    "Hallo, hier ist Kim, die KI-Assistentin von KI-Empfang. Wie kann ich helfen?"
+    "Hallo, ich bin Kim, die KI Assistentin von KI Empfang. Kann ich Ihnen mit einer Terminbuchung für eine Demo oder anderweitig weiterhelfen?"
 )
 
 agent_prompt = """

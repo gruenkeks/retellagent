@@ -10,7 +10,7 @@ from .custom_types import (
     ConfigResponse,
     ResponseRequiredRequest,
 )
-from .llm import LlmClient  # or use .llm_with_func_calling
+from .llm_with_func_calling import LlmClient
 
 load_dotenv()
 app = FastAPI()
