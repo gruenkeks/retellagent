@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from datetime import datetime
 from typing import List, Optional
 
 import requests
@@ -17,41 +18,55 @@ begin_sentence = (
 )
 
 agent_prompt = """
-Du bist "Kim", die KI-Assistentin der Agentur "KI-Empfang". Deine Aufgabe ist es, Anrufer zu qualifizieren, Termine zu buchen, zu verschieben oder zu stornieren und Fragen zu beantworten. Sprich immer DEUTSCH, natürlich, kurz und fließend.
+# ROLE & IDENTITY
+Du bist Kim, die KI-Rezeptionistin der Agentur "KI-Empfang".
+Deine Aufgabe ist es, Anrufer freundlich zu begrüßen, allgemeine Fragen zu beantworten und Termine für eine "Demo" zu vereinbaren.
+Du sprichst ausschließlich Deutsch und verwendest immer die höfliche "Sie-Form".
 
-ABSOLUTE REGELN (NIEMALS BRECHEN)
-1) E-Mail NIEMALS erfragen; verwende immer die Firmen-E-Mail: anfrage@kiempfang.de.
-2) Telefonnummer: Immer +49 voranstellen und führende 0 entfernen, bevor du sie an Tools übergibst.
-3) Nutze immer {{user_number}} als Anrufernummer, wenn verfügbar.
-4) Zeitzone immer Europe/Berlin; nicht nach Zeitzone fragen.
-5) Datum/Zeit: Nutze {{current_time_Europe/Berlin}}; berechne Begriffe wie "morgen" exakt.
-6) Stornierung: keine Begründung erfragen; cancellation_reason immer "Stornierung".
-7) Tool book_appointment_cal muss immer phone enthalten.
+# CONTEXT VARIABLES
+- Aktuelles Datum/Zeit (String): {{current_time_Europe/Berlin}}
+- Telefonnummer-Status: {{phone_status}}
 
-FORMAT FÜR NATÜRLICHE SPRACHAUSGABE
-- Uhrzeiten niemals als 14:00/14:30, sondern "14 Uhr" oder "14 Uhr 30".
-- Keine Abkürzungen (schreibe "zum Beispiel", "und so weiter", "Euro").
-- Keine Listen/Aufzählungen; sprich in fließenden Sätzen.
-- Keine internen Hinweise vorlesen; bei Wartezeit: "Einen Moment, ich schaue in den Kalender."
+# TOOLS AVAILABLE
+Du hast Zugriff auf zwei Tools. Nutze sie proaktiv!
+1. `check_availability_cal`: Um freie Slots abzurufen.
+2. `book_appointment_cal`: Um den Termin final zu buchen.
 
-SICHERHEIT / VERIFIKATION
-- Für Umbuchung/Stornierung immer Terminzeit erfragen.
-- Identität nur bestätigen, wenn entweder (a) Telefonnummer passt oder (b) Name passt.
-- Ohne Match: nichts stornieren/verschieben.
+# CONVERSATION FLOW (FLEXIBEL)
+Du steuerst das Gespräch natürlich. Dein Hauptziel ist es, einen Termin für eine Demo zu buchen.
+- Prüfe Verfügbarkeiten, wenn der Nutzer Interesse zeigt.
+- Schlage konkrete Termine vor ("Heute um 15 Uhr oder morgen um 10 Uhr?").
+- Wenn ein Termin passt, frage nach den nötigen Daten (Name) und buche ihn.
+- Sei hilfreich, aber halte das Gespräch fokussiert.
 
-CAL.COM HINWEISE
-- Buchungen: nutze eventTypeId, Europe/Berlin. Verwende immer attendeeEmail=anfrage@kiempfang.de.
-- Prüfe Verfügbarkeit mit check_availability_cal.
-- Buchung: book_appointment_cal (name, phone, gewünschte Zeit).
-- Umbuchung: reschedule_appointment_cal mit booking_uid.
-- Storno: cancel_appointment_cal mit booking_uid.
-- Falls booking_uid fehlt: frage nach genauer Terminzeit; nutze get_bookings_by_time_range (kleines Zeitfenster um die genannte Uhrzeit) und verifiziere via Name oder Telefonnummer.
-- Telefonnummer bei Anlage immer auch in metadata speichern, damit sie später prüfbar ist.
+# CRITICAL RULES FOR TOOL CALLS (JSON LOGIC)
 
-GESPRÄCHSABLAUF (kurz)
-- Begrüßung: "Hallo, hier ist Kim, die KI-Assistentin von KI-Empfang. Wie kann ich Ihnen weiterhelfen?"
-- Bedarf klären kurz, dann Verfügbarkeit prüfen und buchen/umbuchen/stornieren.
-- Immer kurz bestätigen, keine unnötigen Nachfragen.
+Wenn du `book_appointment_cal` aufrufst, musst du EXAKT diese Struktur einhalten, sonst stürzt das System ab:
+
+1. `attendee` MUSS ein verschachteltes Objekt sein.
+2. `phoneNumber` MUSS die Nummer sein.
+
+JSON VORLAGE FÜR BUCHUNG (Orientiere dich hieran!):
+{
+  "start": "2025-MM-DDTHH:mm:ss",
+  "eventTypeId": {{event_type_id}},
+  "attendee": {
+    "name": "Name des Anrufers",
+    "phoneNumber": "+4917...",
+    "timeZone": "Europe/Berlin",
+    "language": "de"
+  }
+}
+
+# ERROR HANDLING & FALLBACK
+- Wenn ein Tool einen Fehler zurückgibt (z.B. 400 Bad Request): Entschuldige dich und sag: "Es gab einen technischen Fehler. Ein Kollege wird Sie zurückrufen."
+- Wenn keine Termine frei sind: Biete einen Rückruf an.
+
+# STYLE GUIDE (TTS OPTIMIERUNG)
+Damit deine Stimme natürlich klingt:
+- Schreibe Zahlen von 1-12 aus ("zwei" statt "2").
+- Schreibe Datum als "am achten Dezember" (nie "08.12.").
+- Vermeide Abkürzungen wie "z.B." -> sag "zum Beispiel".
 """
 
 
@@ -96,6 +111,12 @@ class LlmClient:
         if not self.cal_api_key:
             print("[WARN] CAL_API_KEY not set; Cal.com calls will fail")
 
+        self.cal_event_type_id = os.environ.get("CAL_EVENT_TYPE_ID", "")
+        if not self.cal_event_type_id:
+            print("[WARN] CAL_EVENT_TYPE_ID not set; Booking calls will fail")
+
+        self.user_phone = "Nicht verfügbar"
+
     def draft_begin_message(self):
         response = ResponseResponse(
             response_id=0,
@@ -115,10 +136,24 @@ class LlmClient:
         return messages
 
     def prepare_prompt(self, request: ResponseRequiredRequest):
+        current_time_str = datetime.now().strftime("%A, %d. %B %Y, %H:%M Uhr")
+        system_content = agent_prompt.replace("{{current_time_Europe/Berlin}}", current_time_str)
+        
+        # Inject phone status
+        if self.user_phone and self.user_phone != "Nicht verfügbar":
+             system_content = system_content.replace("{{phone_status}}", "BEREITS BEKANNT")
+        else:
+             system_content = system_content.replace("{{phone_status}}", "NICHT BEKANNT")
+
+        if self.cal_event_type_id:
+            system_content = system_content.replace("{{event_type_id}}", str(self.cal_event_type_id))
+        else:
+            system_content = system_content.replace("{{event_type_id}}", "[EVENT_TYPE_ID_MISSING]")
+
         prompt = [
             {
                 "role": "system",
-                "content": agent_prompt,
+                "content": system_content,
             }
         ]
         transcript_messages = self.convert_transcript_to_openai_messages(
@@ -173,16 +208,19 @@ class LlmClient:
                                 "type": "string",
                                 "description": "Startzeit ISO-8601",
                             },
-                            "name": {"type": "string"},
-                            "phone": {"type": "string"},
-                            "timeZone": {
-                                "type": "string",
-                                "description": "Standard Europe/Berlin",
-                                "default": "Europe/Berlin",
+                            "attendee": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "email": {"type": "string"},
+                                    "phoneNumber": {"type": "string"},
+                                    "timeZone": {"type": "string"},
+                                    "language": {"type": "string"},
+                                },
+                                "required": ["name", "timeZone", "language"],
                             },
-                            "language": {"type": "string", "default": "de"},
                         },
-                        "required": ["eventTypeId", "start", "name", "phone"],
+                        "required": ["eventTypeId", "start", "attendee"],
                     },
                 },
             },
@@ -267,18 +305,24 @@ class LlmClient:
         r.raise_for_status()
         return r.json()
 
-    def _book(self, event_type_id: int, start: str, name: str, phone: str):
+    def _book(self, event_type_id: int, start: str, attendee: dict):
         url = "https://api.cal.com/v2/bookings"
+        # Extract phone from attendee, or fallback to system captured phone
+        phone = attendee.get("phoneNumber")
+        if not phone and self.user_phone and self.user_phone != "Nicht verfügbar":
+            phone = self.user_phone
+            attendee["phoneNumber"] = phone # Add back to attendee for completeness
+            
         norm_phone = _normalize_phone(phone)
+        
+        # Ensure email is set as per prompt requirement if LLM missed it or for safety
+        if not attendee.get("email"):
+            attendee["email"] = "anfrage@kiempfang.de"
+
         payload = {
             "eventTypeId": event_type_id,
             "start": start,
-            "attendee": {
-                "name": name,
-                "email": "anfrage@kiempfang.de",
-                "timeZone": "Europe/Berlin",
-                "language": "de",
-            },
+            "attendee": attendee,
             "metadata": {"phone": norm_phone},
         }
         r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
@@ -398,8 +442,7 @@ class LlmClient:
                 self._book,
                 args["eventTypeId"],
                 args["start"],
-                args["name"],
-                args["phone"],
+                args["attendee"],
             )
             uid = data.get("booking", {}).get("uid")
             start = data.get("booking", {}).get("start")

@@ -83,6 +83,12 @@ async def websocket_handler(websocket: WebSocket, call_id: str):
             # Not all of them need to be handled, only response_required and reminder_required.
             if request_json["interaction_type"] == "call_details":
                 print(json.dumps(request_json, indent=2))
+                call_data = request_json.get("call", {})
+                # Try from_number (inbound) or to_number (outbound)
+                phone = call_data.get("from_number") or call_data.get("to_number")
+                if phone:
+                    print(f"Captured user phone: {phone}")
+                    llm_client.user_phone = phone
                 return
             if request_json["interaction_type"] == "ping_pong":
                 await websocket.send_json(
