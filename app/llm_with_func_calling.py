@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import pytz
 from datetime import datetime
 from typing import List, Optional
 
@@ -143,7 +144,8 @@ class LlmClient:
         return messages
 
     def prepare_prompt(self, request: ResponseRequiredRequest):
-        current_time_str = datetime.now().strftime("%A, %d. %B %Y, %H:%M Uhr")
+        tz = pytz.timezone("Europe/Berlin")
+        current_time_str = datetime.now(tz).strftime("%A, %d. %B %Y, %H:%M Uhr")
         system_content = agent_prompt.replace("{{current_time_Europe/Berlin}}", current_time_str)
         
         # Inject phone status
@@ -395,6 +397,8 @@ class LlmClient:
                 args = json.loads(tool_call.function.arguments)
                 func_name = tool_call.function.name
                 
+                print(f"[DEBUG] Executing tool: {func_name} with args: {args}")
+
                 content = ""
                 # Execute Python Logic
                 try:
