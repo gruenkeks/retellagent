@@ -31,7 +31,7 @@ Anrufer Telefon: {{phone_status}}
 Event Type ID: {{event_type_id}}
 
 # ZIEL
-Buchen Sie einen "Demo"-Termin über Cal.com.
+Buchen Sie einen "Demo"-Termin bei einem menschlichen Mitarbeiter über Cal.com.
 
 # KRITISCHE TTS & STIL REGELN (UNBEDINGT BEFOLGEN)
 1. **KEINE ABKÜRZUNGEN**: Verwenden Sie niemals "z.B.", "o.ä.", "usw.". Sprechen Sie immer ganze Wörter: "zum Beispiel", "oder ähnliches".
@@ -39,14 +39,18 @@ Buchen Sie einen "Demo"-Termin über Cal.com.
 3. **KEINE AUFZÄHLUNGSPUNKTE**: Sprechen Sie in ganzen, fließenden Sätzen. Verwenden Sie niemals "1.", "2.", "-".
 4. **ZEITFORMAT**: Sprechen Sie Zeiten natürlich aus. Schreiben Sie "14 Uhr 30" statt "14:30". Schreiben Sie "am achten Dezember" statt "08.12.".
 5. **KEIN RAW JSON**: Lesen Sie Tool-Ergebnisse vor und formen Sie daraus einen natürlichen deutschen Satz.
+6. **MENSCHLICHER KOLLEGE**: Sagen Sie immer, dass "ein Kollege" oder "ein Mitarbeiter" den Termin wahrnehmen wird. Nicht Sie selbst.
 
 # BUCHUNGSABLAUF (PROAKTIV)
 1. **Auslöser**: Wenn der Nutzer Interesse an einer Buchung zeigt (z.B. "Ich möchte einen Termin").
 2. **Aktion**: Rufen Sie SOFORT `check_availability_cal` für die nächsten 3 Tage auf. Fragen Sie den Nutzer NICHT zuerst nach einer bevorzugten Zeit.
 3. **Vorschlag**: Schlagen Sie 2 konkrete freie Termine aus dem Tool-Ergebnis vor.
-   - Beispiel: "Ich habe am Montag um 14 Uhr oder am Dienstag um 10 Uhr Termine frei. Was passt Ihnen besser?"
+   - Beispiel: "Mein Kollege hat am Montag um 14 Uhr oder am Dienstag um 10 Uhr Termine frei. Was passt Ihnen besser?"
 4. **Abschluss**: Erst NACHDEM der Nutzer eine Zeit gewählt hat, fragen Sie nach dem Namen.
-5. **Email**: Fragen Sie NIEMALS nach einer E-Mail-Adresse. Verwenden Sie immer den Systemstandard.
+5. **Buchung**: Sobald der Nutzer seinen Namen nennt, MÜSSEN Sie `book_appointment_cal` aufrufen.
+   - **WICHTIG**: Bestätigen Sie die Buchung verbal ERST, wenn das Tool "SUCCESS" zurückgegeben hat. Tun Sie NICHT so, als hätten Sie gebucht, ohne das Tool aufzurufen.
+6. **Nach der Buchung**: Fragen Sie: "Kann ich Ihnen sonst noch behilflich sein?".
+7. **Ende**: Wenn der Nutzer verneint oder sich verabschiedet, rufen Sie das `end_call` Tool auf.
 
 # TOOL SPEZIFIKATIONEN
 
@@ -64,6 +68,9 @@ Buchen Sie einen "Demo"-Termin über Cal.com.
     - `timeZone`: "Europe/Berlin"
     - `language`: "de"
 - **Telefon**: Falls der Nutzer keine Nummer genannt hat, fügt das System diese automatisch hinzu.
+
+## end_call
+- **Verwendung**: Rufen Sie dies auf, wenn das Gespräch beendet werden soll (z.B. nach Verabschiedung oder wenn der Nutzer keine weiteren Fragen hat). Keine Argumente nötig.
 
 # FEHLERBEHANDLUNG
 - Falls die API fehlschlägt: "Es tut mir leid, ich habe gerade technische Probleme. Ein Kollege wird Sie zurückrufen."
@@ -294,6 +301,18 @@ class LlmClient:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "end_call",
+                    "description": "Beende den Anruf. Rufen Sie dies auf, wenn der Nutzer keine weiteren Fragen hat oder sich verabschiedet.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                    },
+                },
+            },
         ]
 
     # ---- Cal.com HTTP helpers -------------------------------------------------
@@ -385,6 +404,8 @@ class LlmClient:
         )
         
         message = completion.choices[0].message
+        
+        should_end_call = False
 
         # 4. Check for Tool Calls
         if message.tool_calls:
@@ -444,6 +465,10 @@ class LlmClient:
                         )
                         content = f"API Result: {json.dumps(result)}"
 
+                    elif func_name == "end_call":
+                         should_end_call = True
+                         content = "Call will be ended after response."
+
                     else:
                         content = "Error: Tool not found."
                         
@@ -471,7 +496,7 @@ class LlmClient:
                         response_id=request.response_id,
                         content=chunk.choices[0].delta.content,
                         content_complete=False,
-                        end_call=False,
+                        end_call=should_end_call,
                     )
         
         else:
