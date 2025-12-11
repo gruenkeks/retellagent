@@ -49,7 +49,7 @@ Buchen Sie einen "Demo"-Termin bei einem menschlichen Mitarbeiter über Cal.com.
 3. **Namen erfragen**: Fragen Sie nach dem Namen des Nutzers.
 4. **BUCHUNG DURCHFÜHREN**:
    - Sobald Sie Zeit UND Namen haben, MÜSSEN Sie `book_appointment_cal` aufrufen.
-   - Argumente: `eventTypeId`, `start` (ISO-Format der vereinbarten Zeit), `attendee.name` (Name des Nutzers).
+   - Argumente: `eventTypeId`, `start` (ISO-Format der vereinbarten Zeit), `attendee_name` (Name des Nutzers).
    - **WICHTIG**: Rufen Sie das Tool auf, BEVOR Sie antworten.
 5. **Bestätigung**: Wenn das Tool "SUCCESS" meldet, bestätigen Sie dem Nutzer den Termin.
 6. **Abschluss**: Fragen Sie: "Kann ich Ihnen sonst noch behilflich sein?".
@@ -78,11 +78,7 @@ Agent (Sprache): "Auf Wiedersehen!" (und Call endet)
 - **Verwendung**: Aufrufen, sobald Zeit vereinbart und Name bekannt ist.
 - **PFLICHTFELDER**:
   - `start`: ISO-8601 String in UTC (z.B. "2024-12-12T13:00:00Z")
-  - `attendee`: 
-    - `name`: Gesprochener Name des Nutzers.
-    - `email`: HARTCODIERT auf "anfrage@kiempfang.de". (NIEMALS DEN NUTZER FRAGEN)
-    - `timeZone`: "Europe/Berlin"
-    - `language`: "de"
+  - `attendee_name`: Gesprochener Name des Nutzers.
 - **Telefon**: Falls der Nutzer keine Nummer genannt hat, fügt das System diese automatisch hinzu.
 
 ## end_call
@@ -231,7 +227,7 @@ class LlmClient:
                 "type": "function",
                 "function": {
                     "name": "book_appointment_cal",
-                    "description": "Buche einen festen Termin. BEISPIEL ARGUMENTE: {'eventTypeId': 123, 'start': '2025-10-12T07:00:00Z', 'attendee': {'name': 'Max', 'email': 'max@test.de', 'timeZone': 'Europe/Berlin', 'language': 'de'}}",
+                    "description": "Buche einen festen Termin. BEISPIEL ARGUMENTE: {'eventTypeId': 123, 'start': '2025-10-12T07:00:00Z', 'attendee_name': 'Max Mustermann'}",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -240,19 +236,12 @@ class LlmClient:
                                 "type": "string",
                                 "description": "Startzeit ISO-8601 UTC (z.B. 2025-10-12T07:00:00Z)",
                             },
-                            "attendee": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "email": {"type": "string"},
-                                    "phoneNumber": {"type": "string"},
-                                    "timeZone": {"type": "string"},
-                                    "language": {"type": "string"},
-                                },
-                                "required": ["name", "timeZone", "language"],
+                            "attendee_name": {
+                                "type": "string",
+                                "description": "Gesprochener Name des Nutzers",
                             },
                         },
-                        "required": ["eventTypeId", "start", "attendee"],
+                        "required": ["eventTypeId", "start", "attendee_name"],
                     },
                 },
             },
@@ -339,10 +328,16 @@ class LlmClient:
         }
 
     def _check_availability(self, event_type_id: int, start: str, end: str):
-        url = "https://api.cal.com/v2/slots/available"
+        url = "https://api.cal.com/v2/slots"
+        params = {
+            "eventTypeId": event_type_id,
+            "start": start,
+            "end": end,
+            "timeZone": "Europe/Berlin",
+        }
         r = requests.get(
             url,
-            params={"eventTypeId": event_type_id, "startTime": start, "endTime": end},
+            params=params,
             headers=self._headers(),
             timeout=20,
         )
@@ -465,16 +460,20 @@ class LlmClient:
                         content = f"API Result: {json.dumps(result)}"
                         
                     elif func_name == "book_appointment_cal":
-                        # Auto-inject phone if missing in LLM args
-                        attendee = args.get("attendee", {})
-                        if "phoneNumber" not in attendee or not attendee["phoneNumber"]:
-                            if self.user_phone and self.user_phone != "Nicht verfügbar":
-                                attendee["phoneNumber"] = self.user_phone
-                        args["attendee"] = attendee
+                        # Construct attendee object from flat args
+                        attendee = {
+                            "name": args["attendee_name"],
+                            "email": "anfrage@kiempfang.de",
+                            "timeZone": "Europe/Berlin",
+                            "language": "de"
+                        }
+                        
+                        if self.user_phone and self.user_phone != "Nicht verfügbar":
+                            attendee["phoneNumber"] = self.user_phone
                         
                         result = await asyncio.to_thread(
                             self._book,
-                            args["eventTypeId"], args["start"], args["attendee"]
+                            args["eventTypeId"], args["start"], attendee
                         )
                         content = "SUCCESS: Appointment booked. Confirm this to user."
                     
