@@ -346,6 +346,7 @@ class LlmClient:
             headers=self._headers(),
             timeout=20,
         )
+        print(f"[DEBUG] Cal API Status: {r.status_code}, Response: {r.text}")
         r.raise_for_status()
         return r.json()
 
@@ -379,6 +380,7 @@ class LlmClient:
             "metadata": {"phone": norm_phone},
         }
         r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
+        print(f"[DEBUG] Cal Book API Status: {r.status_code}, Response: {r.text}")
         r.raise_for_status()
         return r.json()
 
@@ -395,6 +397,7 @@ class LlmClient:
         url = f"https://api.cal.com/v2/bookings/{booking_uid}/reschedule"
         payload = {"start": start, "reschedulingReason": reason}
         r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
+        print(f"[DEBUG] Cal Reschedule API Status: {r.status_code}, Response: {r.text}")
         r.raise_for_status()
         return r.json()
 
@@ -402,6 +405,7 @@ class LlmClient:
         url = f"https://api.cal.com/v2/bookings/{booking_uid}/cancel"
         payload = {"cancellationReason": reason}
         r = requests.post(url, json=payload, headers=self._headers(), timeout=20)
+        print(f"[DEBUG] Cal Cancel API Status: {r.status_code}, Response: {r.text}")
         r.raise_for_status()
         return r.json()
 
@@ -415,6 +419,7 @@ class LlmClient:
         if event_type_id:
             params["eventTypeId"] = event_type_id
         r = requests.get(url, params=params, headers=self._headers(), timeout=20)
+        print(f"[DEBUG] Cal Get Bookings API Status: {r.status_code}, Response: {r.text}")
         r.raise_for_status()
         return r.json()
 
@@ -511,6 +516,7 @@ class LlmClient:
                         content = "Error: Tool not found."
                         
                 except Exception as e:
+                    print(f"[ERROR] Tool execution failed: {e}")
                     content = f"API Error: {str(e)}"
 
                 # C. Append Tool Result to history
