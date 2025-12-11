@@ -44,14 +44,19 @@ Buchen Sie einen "Demo"-Termin bei einem menschlichen Mitarbeiter über Cal.com.
    - Zeiten natürlich sprechen (14 Uhr 30).
 
 # BUCHUNGSABLAUF
-1. **Verfügbarkeit prüfen**: Wenn der Nutzer Interesse zeigt -> `check_availability_cal` aufrufen.
-2. **Termin vereinbaren**: Schlagen Sie Zeiten vor. Warten Sie auf die Zustimmung des Nutzers.
+1. **Verfügbarkeit prüfen**: Wenn der Nutzer Interesse zeigt oder eine Zeit nennt (z.B. "morgen"), MÜSSEN Sie `check_availability_cal` aufrufen. ANTWORTEN SIE NICHT MIT TEXT ("Ich schaue nach..."), SONDERN RUFEN SIE DAS TOOL AUF.
+2. **Termin vereinbaren**: Schlagen Sie Zeiten vor basierend auf dem Tool-Output.
 3. **Namen erfragen**: Fragen Sie nach dem Namen des Nutzers.
 4. **BUCHUNG DURCHFÜHREN**:
    - Sobald Sie Zeit UND Namen haben, MÜSSEN Sie `book_appointment_cal` aufrufen.
    - Argumente: `eventTypeId`, `start` (ISO-Format der vereinbarten Zeit), `attendee_name` (Name des Nutzers).
    - **WICHTIG**: Rufen Sie das Tool auf, BEVOR Sie antworten.
 5. **Bestätigung**: Wenn das Tool "SUCCESS" meldet, bestätigen Sie dem Nutzer den Termin.
+
+**EXTREME WICHTIG**:
+- Wenn der Nutzer nach freien Terminen fragt -> TOOL CALL `check_availability_cal`.
+- Wenn der Nutzer eine Zeit vorschlägt -> TOOL CALL `check_availability_cal` (prüfen ob frei).
+- KEINE LEEREN VERSPRECHUNGEN: Sagen Sie nie "Ich schaue nach", ohne gleichzeitig das Tool aufzurufen.
 6. **Abschluss**: Fragen Sie: "Kann ich Ihnen sonst noch behilflich sein?".
 7. **Ende**: Wenn der Nutzer "Nein" sagt oder sich verabschiedet -> `end_call` Tool aufrufen.
 
@@ -205,21 +210,21 @@ class LlmClient:
                 "type": "function",
                 "function": {
                     "name": "check_availability_cal",
-                    "description": "Prüfe freie Slots in Cal.com. EXAMPLE ARGUMENTS: {'eventTypeId': 123, 'startTime': '2025-10-12T07:00:00Z', 'endTime': '2025-10-15T16:00:00Z'}",
+                    "description": "Prüfe freie Slots in Cal.com. EXAMPLE ARGUMENTS: {'eventTypeId': 123, 'start': '2025-10-12T07:00:00Z', 'end': '2025-10-15T16:00:00Z'}",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "eventTypeId": {"type": "integer"},
-                            "startTime": {
+                            "start": {
                                 "type": "string",
                                 "description": "ISO-8601 Start (UTC Z)",
                             },
-                            "endTime": {
+                            "end": {
                                 "type": "string",
                                 "description": "ISO-8601 Ende (UTC Z)",
                             },
                         },
-                        "required": ["eventTypeId", "startTime", "endTime"],
+                        "required": ["eventTypeId", "start", "end"],
                     },
                 },
             },
@@ -455,7 +460,7 @@ class LlmClient:
                     if func_name == "check_availability_cal":
                         result = await asyncio.to_thread(
                             self._check_availability,
-                            args["eventTypeId"], args["startTime"], args["endTime"]
+                            args["eventTypeId"], args["start"], args["end"]
                         )
                         content = f"API Result: {json.dumps(result)}"
                         
